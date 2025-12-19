@@ -3,27 +3,19 @@ const app = express();
 
 app.use(express.json());
 
-// Test sống
 app.get("/", (req, res) => {
   res.send("Solspace backend is running");
 });
 
-// Status cho frontend
-app.get("/status", (req, res) => {
-  res.json({ status: "ok", service: "solspace-backend" });
-});
-
-// Test endpoint để game gọi
-app.post("/api/ping", (req, res) => {
-  const { wallet } = req.body;
+app.get("/api/ping", (req, res) => {
   res.json({
     ok: true,
-    wallet: wallet || null,
+    service: "solspace-backend",
     time: Date.now()
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Solspace backend running on port " + PORT);
+  console.log("Server running on port", PORT);
 });
