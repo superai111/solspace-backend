@@ -1,0 +1,12 @@
+{
+  "name": "solspace-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "@solana/web3.js": "^1.95.3"
+  }
+}
