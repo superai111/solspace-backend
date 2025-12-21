@@ -24,10 +24,25 @@ const userPoints = new Map(); // wallet string → points number
 // processed deposit tx signatures (A1)
 const processedDepositTx = new Set();
 
+// ===== anti-bot + season memory =====
+const userLastPlay = new Map();
+const userPlayCount = new Map();
+
 /* ================= HELPER ================= */
 function getRangeMs(range) {
   if (range === "7d") return 7 * 24 * 60 * 60 * 1000;
   return 48 * 60 * 60 * 1000; // default 48h
+}
+
+function getCurrentSeasonId() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const week = Math.floor(
+    (Date.UTC(year, now.getUTCMonth(), now.getUTCDate()) -
+      Date.UTC(year, 0, 1)) /
+      (7 * 24 * 60 * 60 * 1000)
+  );
+  return `${year}-W${week}`;
 }
 
 // Cleanup old logs định kỳ (chạy mỗi giờ)
@@ -51,6 +66,31 @@ app.post("/game/result", (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid data" });
   }
 
+  // anti-bot nâng cao
+  const now = Date.now();
+
+  const last = userLastPlay.get(wallet) || 0;
+  if (now - last < 800) {
+    return res.status(429).json({ ok: false, error: "Too fast" });
+  }
+  userLastPlay.set(wallet, now);
+
+  const window = userPlayCount.get(wallet) || { count: 0, windowStart: now };
+  if (now - window.windowStart > 60 * 1000) {
+    window.count = 0;
+    window.windowStart = now;
+  }
+  window.count += 1;
+  userPlayCount.set(wallet, window);
+
+  if (window.count > 120) {
+    return res.status(429).json({ ok: false, error: "Rate limit" });
+  }
+
+  if (volume === 0 && profit > 0) {
+    return res.status(400).json({ ok: false, error: "Invalid round" });
+  }
+
   // A2 – basic anti-cheat
   const MAX_MULTIPLIER = 100;
   if (profit < 0 || volume < 0) {
@@ -69,7 +109,8 @@ app.post("/game/result", (req, res) => {
     profit,
     volume,
     rounds: 1,
-    time: Date.now()
+    time: Date.now(),
+    season: getCurrentSeasonId()
   });
 
   res.json({ ok: true });
@@ -140,8 +181,11 @@ app.get("/leaderboard", (req, res) => {
   const range = req.query.range || "48h";
   const now = Date.now();
   const fromTime = now - getRangeMs(range);
+  const currentSeason = getCurrentSeasonId();
 
-  const filtered = gameLogs.filter(g => g.time >= fromTime);
+  const filtered = gameLogs.filter(
+    g => g.time >= fromTime && g.season === currentSeason
+  );
 
   const map = {};
   for (const g of filtered) {
@@ -183,8 +227,11 @@ app.get("/leaderboard", (req, res) => {
 /* ================= ADD: FINAL LEADERBOARD (C + D) ================= */
 app.get("/leaderboard/final", (req, res) => {
   const map = {};
+  const currentSeason = getCurrentSeasonId();
 
   for (const g of gameLogs) {
+    if (g.season !== currentSeason) continue;
+
     if (!map[g.wallet]) {
       map[g.wallet] = {
         wallet: g.wallet,
