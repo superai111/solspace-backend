@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import Database from "better-sqlite3";
 import { Connection, PublicKey } from "@solana/web3.js";
 
 const app = express();
@@ -9,53 +10,76 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 /* ================= CONFIG ================= */
-const POINT_PER_SOL = 1000; // 1 SOL = 1000 points (có thể điều chỉnh)
-const SYSTEM_WALLET = new PublicKey("H2yVMrEbexHFdsAMFQtBY3Lp3BBz6cu6VVJwyiommqxZ");
 const SOLANA_RPC = "https://api.mainnet-beta.solana.com";
 const connection = new Connection(SOLANA_RPC, "confirmed");
 
-/* ================= MEMORY DB ================= */
-// gameLogs cho leaderboard
-const gameLogs = [];
+const SYSTEM_WALLET = new PublicKey(
+  "H2yVMrEbexHFdsAMFQtBY3Lp3BBz6cu6VVJwyiommqxZ"
+);
 
-// userPoints: lưu điểm của từng wallet (thay thế localStorage frontend)
-const userPoints = new Map(); // wallet string → points number
+const POINT_PER_SOL = 1000;
+const MIN_DEPOSIT_SOL = 0.005;
+const MAX_MULTIPLIER = 100;
 
-// processed deposit tx signatures (A1)
-const processedDepositTx = new Set();
+/* ================= DATABASE ================= */
+const db = new Database("./solspace.db");
 
-// ===== anti-bot + season memory =====
-const userLastPlay = new Map();
-const userPlayCount = new Map();
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  wallet TEXT PRIMARY KEY,
+  points INTEGER DEFAULT 0
+);
 
-/* ================= HELPER ================= */
-function getRangeMs(range) {
-  if (range === "7d") return 7 * 24 * 60 * 60 * 1000;
-  return 48 * 60 * 60 * 1000; // default 48h
+CREATE TABLE IF NOT EXISTS game_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  wallet TEXT,
+  profit INTEGER,
+  volume INTEGER,
+  time INTEGER,
+  season TEXT
+);
+
+CREATE TABLE IF NOT EXISTS deposits (
+  signature TEXT PRIMARY KEY,
+  wallet TEXT,
+  points INTEGER,
+  time INTEGER
+);
+`);
+
+/* ================= HELPERS ================= */
+function now() {
+  return Date.now();
 }
 
-function getCurrentSeasonId() {
-  const now = new Date();
-  const year = now.getUTCFullYear();
+function seasonId() {
+  const d = new Date();
+  const year = d.getUTCFullYear();
   const week = Math.floor(
-    (Date.UTC(year, now.getUTCMonth(), now.getUTCDate()) -
+    (Date.UTC(year, d.getUTCMonth(), d.getUTCDate()) -
       Date.UTC(year, 0, 1)) /
       (7 * 24 * 60 * 60 * 1000)
   );
   return `${year}-W${week}`;
 }
 
-// Cleanup old logs định kỳ (chạy mỗi giờ)
-setInterval(() => {
-  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000; // giữ 30 ngày
-  while (gameLogs.length > 0 && gameLogs[0].time < cutoff) {
-    gameLogs.shift();
-  }
-}, 60 * 60 * 1000);
+function ensureUser(wallet) {
+  db.prepare(
+    `INSERT OR IGNORE INTO users (wallet, points) VALUES (?, 0)`
+  ).run(wallet);
+}
 
-/* ================= STATUS ================= */
-app.get("/", (req, res) => {
-  res.json({ ok: true, service: "solspace-backend", players: userPoints.size });
+/* ================= HEALTH ================= */
+app.get("/", (_, res) => {
+  const count = db
+    .prepare(`SELECT COUNT(*) as c FROM users`)
+    .get().c;
+
+  res.json({
+    ok: true,
+    service: "solspace-mainnet-db",
+    players: count
+  });
 });
 
 /* ================= GAME RESULT ================= */
@@ -63,107 +87,82 @@ app.post("/game/result", (req, res) => {
   const { wallet, profit, volume } = req.body;
 
   if (!wallet || typeof profit !== "number" || typeof volume !== "number") {
-    return res.status(400).json({ ok: false, error: "Invalid data" });
+    return res.status(400).json({ ok: false });
   }
 
-  // anti-bot nâng cao
-  const now = Date.now();
-
-  const last = userLastPlay.get(wallet) || 0;
-  if (now - last < 800) {
-    return res.status(429).json({ ok: false, error: "Too fast" });
-  }
-  userLastPlay.set(wallet, now);
-
-  const window = userPlayCount.get(wallet) || { count: 0, windowStart: now };
-  if (now - window.windowStart > 60 * 1000) {
-    window.count = 0;
-    window.windowStart = now;
-  }
-  window.count += 1;
-  userPlayCount.set(wallet, window);
-
-  if (window.count > 120) {
-    return res.status(429).json({ ok: false, error: "Rate limit" });
-  }
-
-  if (volume === 0 && profit > 0) {
-    return res.status(400).json({ ok: false, error: "Invalid round" });
-  }
-
-  // A2 – basic anti-cheat
-  const MAX_MULTIPLIER = 100;
   if (profit < 0 || volume < 0) {
-    return res.status(400).json({ ok: false, error: "Invalid values" });
+    return res.status(400).json({ ok: false });
   }
+
   if (profit > volume * MAX_MULTIPLIER) {
-    return res.status(400).json({ ok: false, error: "Cheat detected" });
+    return res.status(400).json({ ok: false });
   }
 
-  // Cập nhật points người chơi
-  const current = userPoints.get(wallet) || 0;
-  userPoints.set(wallet, current + profit);
+  ensureUser(wallet);
 
-  gameLogs.push({
-    wallet,
-    profit,
-    volume,
-    rounds: 1,
-    time: Date.now(),
-    season: getCurrentSeasonId()
-  });
+  db.prepare(`
+    UPDATE users SET points = points + ? WHERE wallet = ?
+  `).run(profit, wallet);
+
+  db.prepare(`
+    INSERT INTO game_logs (wallet, profit, volume, time, season)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(wallet, profit, volume, now(), seasonId());
 
   res.json({ ok: true });
 });
 
-/* ================= DEPOSIT VERIFY (ON-CHAIN) ================= */
+/* ================= DEPOSIT VERIFY ================= */
 app.post("/check-deposit", async (req, res) => {
   const { wallet } = req.body;
+  if (!wallet) return res.json({ ok: false, addedPoint: 0 });
 
-  if (!wallet) {
-    return res.status(400).json({ ok: false, error: "Missing wallet" });
-  }
+  ensureUser(wallet);
+
+  let addedPoint = 0;
 
   try {
     const pubkey = new PublicKey(wallet);
 
-    const signatures = await connection.getConfirmedSignaturesForAddress2(
-      pubkey,
-      { limit: 20 }
-    );
+    const sigs = await connection.getSignaturesForAddress(pubkey, { limit: 20 });
 
-    let addedPoint = 0;
+    for (const s of sigs) {
+      const used = db
+        .prepare(`SELECT 1 FROM deposits WHERE signature = ?`)
+        .get(s.signature);
 
-    for (const sigInfo of signatures) {
-      if (processedDepositTx.has(sigInfo.signature)) continue;
+      if (used) continue;
 
-      const tx = await connection.getConfirmedTransaction(sigInfo.signature);
-      if (!tx || !tx.meta || tx.meta.err) continue;
+      const tx = await connection.getParsedTransaction(
+        s.signature,
+        { maxSupportedTransactionVersion: 0 }
+      );
 
-      const instructions = tx.transaction.message.instructions;
+      if (!tx || tx.meta?.err) continue;
 
-      for (const ix of instructions) {
-        if (ix.programId.toString() !== "11111111111111111111111111111111") continue;
+      for (const ix of tx.transaction.message.instructions) {
+        if (ix.program !== "system" || ix.parsed?.type !== "transfer") continue;
 
-        const amountLamports = ix.parsed?.info?.lamports;
-        if (!amountLamports) continue;
-
-        const source = ix.parsed?.info?.source;
-        const destination = ix.parsed?.info?.destination;
+        const { source, destination, lamports } = ix.parsed.info;
 
         if (
           source === wallet &&
           destination === SYSTEM_WALLET.toString() &&
-          amountLamports >= 0.005 * 1e9
+          lamports >= MIN_DEPOSIT_SOL * 1e9
         ) {
-          const solAmount = amountLamports / 1e9;
-          const pointsToAdd = Math.floor(solAmount * POINT_PER_SOL);
+          const sol = lamports / 1e9;
+          const points = Math.floor(sol * POINT_PER_SOL);
 
-          const current = userPoints.get(wallet) || 0;
-          userPoints.set(wallet, current + pointsToAdd);
-          addedPoint += pointsToAdd;
+          db.prepare(`
+            UPDATE users SET points = points + ? WHERE wallet = ?
+          `).run(points, wallet);
 
-          processedDepositTx.add(sigInfo.signature);
+          db.prepare(`
+            INSERT INTO deposits (signature, wallet, points, time)
+            VALUES (?, ?, ?, ?)
+          `).run(s.signature, wallet, points, now());
+
+          addedPoint += points;
         }
       }
     }
@@ -171,7 +170,7 @@ app.post("/check-deposit", async (req, res) => {
     res.json({ ok: true, addedPoint });
 
   } catch (e) {
-    console.error("Deposit check error:", e);
+    console.error(e);
     res.json({ ok: false, addedPoint: 0 });
   }
 });
@@ -179,96 +178,93 @@ app.post("/check-deposit", async (req, res) => {
 /* ================= LEADERBOARD ================= */
 app.get("/leaderboard", (req, res) => {
   const range = req.query.range || "48h";
-  const now = Date.now();
-  const fromTime = now - getRangeMs(range);
-  const currentSeason = getCurrentSeasonId();
+  const ms = range === "7d" ? 7 * 86400000 : 48 * 3600000;
+  const cutoff = now() - ms;
+  const season = seasonId();
 
-  const filtered = gameLogs.filter(
-    g => g.time >= fromTime && g.season === currentSeason
-  );
+  const rows = db.prepare(`
+    SELECT
+      g.wallet,
+      SUM(g.profit) AS profit,
+      SUM(g.volume) AS volume,
+      COUNT(*) AS rounds,
+      u.points AS points
+    FROM game_logs g
+    JOIN users u ON u.wallet = g.wallet
+    WHERE g.time >= ? AND g.season = ?
+    GROUP BY g.wallet
+  `).all(cutoff, season);
 
-  const map = {};
-  for (const g of filtered) {
-    if (!map[g.wallet]) {
-      map[g.wallet] = {
-        wallet: g.wallet,
-        profit: 0,
-        volume: 0,
-        rounds: 0,
-        points: userPoints.get(g.wallet) || 0
-      };
-    }
-    map[g.wallet].profit += g.profit;
-    map[g.wallet].volume += g.volume;
-    map[g.wallet].rounds += g.rounds;
-  }
+  if (!rows.length) return res.json([]);
 
-  const users = Object.values(map);
-  if (users.length === 0) return res.json([]);
+  const maxProfit = Math.max(...rows.map(r => Math.max(r.profit, 0)));
+  const maxVolume = Math.max(...rows.map(r => r.volume));
+  const maxRounds = Math.max(...rows.map(r => r.rounds));
 
-  const maxProfit = Math.max(...users.map(u => Math.max(u.profit, 0)));
-  const maxVolume = Math.max(...users.map(u => u.volume));
-  const maxRounds = Math.max(...users.map(u => u.rounds));
+  rows.forEach(r => {
+    r.score =
+      (maxProfit ? Math.max(r.profit, 0) / maxProfit : 0) * 0.5 +
+      (maxVolume ? r.volume / maxVolume : 0) * 0.3 +
+      (maxRounds ? r.rounds / maxRounds : 0) * 0.2;
+  });
 
-  for (const u of users) {
-    const profitScore = maxProfit ? Math.max(u.profit, 0) / maxProfit : 0;
-    const volumeScore = maxVolume ? u.volume / maxVolume : 0;
-    const roundsScore = maxRounds ? u.rounds / maxRounds : 0;
+  rows.sort((a, b) => b.score - a.score);
+  rows.forEach((r, i) => (r.rank = i + 1));
 
-    u.score = profitScore * 0.5 + volumeScore * 0.3 + roundsScore * 0.2;
-  }
-
-  users.sort((a, b) => b.score - a.score);
-  users.forEach((u, i) => (u.rank = i + 1));
-
-  res.json(users.slice(0, 50));
+  res.json(rows.slice(0, 50));
 });
 
-/* ================= ADD: FINAL LEADERBOARD (C + D) ================= */
+/* ================= FINAL LEADERBOARD ================= */
 app.get("/leaderboard/final", (req, res) => {
-  const map = {};
-  const currentSeason = getCurrentSeasonId();
+  const season = seasonId();
 
-  for (const g of gameLogs) {
-    if (g.season !== currentSeason) continue;
+  const rows = db.prepare(`
+    SELECT
+      g.wallet,
+      SUM(g.profit) AS profit,
+      SUM(g.volume) AS volume,
+      COUNT(*) AS rounds,
+      u.points AS points
+    FROM game_logs g
+    JOIN users u ON u.wallet = g.wallet
+    WHERE g.season = ?
+    GROUP BY g.wallet
+  `).all(season);
 
-    if (!map[g.wallet]) {
-      map[g.wallet] = {
-        wallet: g.wallet,
-        profit: 0,
-        volume: 0,
-        rounds: 0,
-        points: userPoints.get(g.wallet) || 0
-      };
-    }
-    map[g.wallet].profit += g.profit;
-    map[g.wallet].volume += g.volume;
-    map[g.wallet].rounds += g.rounds;
-  }
+  if (!rows.length) return res.json([]);
 
-  const users = Object.values(map);
-  if (users.length === 0) return res.json([]);
+  const maxProfit = Math.max(...rows.map(r => Math.max(r.profit, 0)));
+  const maxVolume = Math.max(...rows.map(r => r.volume));
+  const maxRounds = Math.max(...rows.map(r => r.rounds));
 
-  const maxProfit = Math.max(...users.map(u => Math.max(u.profit, 0)));
-  const maxVolume = Math.max(...users.map(u => u.volume));
-  const maxRounds = Math.max(...users.map(u => u.rounds));
+  rows.forEach(r => {
+    r.finalScore =
+      (maxProfit ? Math.max(r.profit, 0) / maxProfit : 0) * 0.5 +
+      (maxVolume ? r.volume / maxVolume : 0) * 0.3 +
+      (maxRounds ? r.rounds / maxRounds : 0) * 0.2;
+  });
 
-  for (const u of users) {
-    const profitScore = maxProfit ? Math.max(u.profit, 0) / maxProfit : 0;
-    const volumeScore = maxVolume ? u.volume / maxVolume : 0;
-    const roundsScore = maxRounds ? u.rounds / maxRounds : 0;
+  rows.sort((a, b) => b.finalScore - a.finalScore);
+  rows.forEach((r, i) => (r.rank = i + 1));
 
-    u.finalScore = profitScore * 0.5 + volumeScore * 0.3 + roundsScore * 0.2;
-  }
+  res.json(rows.slice(0, 100));
+});
 
-  users.sort((a, b) => b.finalScore - a.finalScore);
-  users.forEach((u, i) => (u.rank = i + 1));
+/* ================= POINTS ================= */
+app.get("/points", (req, res) => {
+  const { wallet } = req.query;
+  if (!wallet) return res.json({ ok: false, points: 0 });
 
-  res.json(users.slice(0, 100));
+  ensureUser(wallet);
+
+  const row = db
+    .prepare(`SELECT points FROM users WHERE wallet = ?`)
+    .get(wallet);
+
+  res.json({ ok: true, points: row.points });
 });
 
 /* ================= START ================= */
 app.listen(PORT, () => {
-  console.log(`Solspace backend running on port ${PORT}`);
-  console.log("Ready for deposits, game results & leaderboard");
+  console.log(`🚀 Solspace MAINNET DB backend running on ${PORT}`);
 });
