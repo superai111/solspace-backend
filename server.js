@@ -66,25 +66,66 @@ function seasonId() {
 }
 
 // timer leaderboard
-function leaderboardTimers() {
-  const nowMs = Date.now();
+app.get("/leaderboard", (req, res) => {
+  const range = req.query.range || "48h";
 
-  // 48h
-  const H48 = 48 * 60 * 60 * 1000;
-  const h48_end = Math.ceil(nowMs / H48) * H48;
+  let rows;
 
-  // tuần (thứ 2 00:00 UTC)
-  const d = new Date();
-  const utcMidnight = Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate()
-  );
-  const day = (d.getUTCDay() + 6) % 7;
-  const week_end = utcMidnight - day * 86400000 + 7 * 86400000;
+  if (range === "7d") {
+    // leaderboard TUẦN (theo season)
+    const season = seasonId();
 
-  return { h48_end, week_end };
-    }
+    rows = db.prepare(`
+      SELECT
+        g.wallet,
+        SUM(g.profit) AS profit,
+        SUM(g.volume) AS volume,
+        COUNT(*) AS rounds,
+        u.points AS points
+      FROM game_logs g
+      JOIN users u ON u.wallet = g.wallet
+      WHERE g.season = ?
+      GROUP BY g.wallet
+    `).all(season);
+
+  } else {
+    // leaderboard 48H (reset đúng 48h, KHÔNG dính season)
+    const H48 = 48 * 60 * 60 * 1000;
+    const nowMs = Date.now();
+    const h48_start = Math.floor(nowMs / H48) * H48;
+
+    rows = db.prepare(`
+      SELECT
+        g.wallet,
+        SUM(g.profit) AS profit,
+        SUM(g.volume) AS volume,
+        COUNT(*) AS rounds,
+        u.points AS points
+      FROM game_logs g
+      JOIN users u ON u.wallet = g.wallet
+      WHERE g.time >= ?
+      GROUP BY g.wallet
+    `).all(h48_start);
+  }
+
+  if (!rows.length) return res.json([]);
+
+  const maxProfit = Math.max(...rows.map(r => Math.max(r.profit, 0)));
+  const maxVolume = Math.max(...rows.map(r => r.volume));
+  const maxRounds = Math.max(...rows.map(r => r.rounds));
+
+  rows.forEach(r => {
+    r.score =
+      (maxProfit ? Math.max(r.profit, 0) / maxProfit : 0) * 0.5 +
+      (maxVolume ? r.volume / maxVolume : 0) * 0.3 +
+      (maxRounds ? r.rounds / maxRounds : 0) * 0.2;
+  });
+
+  rows.sort((a, b) => b.score - a.score);
+  rows.forEach((r, i) => (r.rank = i + 1));
+
+  res.json(rows.slice(0, 50));
+});
 
 function ensureUser(wallet) {
   db.prepare(
