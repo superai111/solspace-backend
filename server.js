@@ -66,55 +66,55 @@ function seasonId() {
 }
 
 // timer leaderboard
-// ================= LEADERBOARD =================
+/* ================= LEADERBOARD ================= */
 app.get("/leaderboard", (req, res) => {
   const range = req.query.range || "48h";
-  let rows;
+  let rows = [];
 
   if (range === "7d") {
     const season = seasonId();
+
     rows = db.prepare(`
       SELECT
         g.wallet,
-        SUM(g.profit) AS profit,
-        SUM(g.volume) AS volume,
-        COUNT(*) AS rounds,
-        u.points AS points
+        SUM(g.profit)  AS profit,
+        SUM(g.volume)  AS volume,
+        COUNT(*)       AS rounds,
+        u.points       AS points
       FROM game_logs g
       JOIN users u ON u.wallet = g.wallet
       WHERE g.season = ?
       GROUP BY g.wallet
     `).all(season);
+
   } else {
-    const H48 = 48 * 60 * 60 * 1000;
-    const nowMs = Date.now();
-    const h48_start = Math.floor(nowMs / H48) * H48;
+    const cutoff = Date.now() - 48 * 60 * 60 * 1000;
 
     rows = db.prepare(`
       SELECT
         g.wallet,
-        SUM(g.profit) AS profit,
-        SUM(g.volume) AS volume,
-        COUNT(*) AS rounds,
-        u.points AS points
+        SUM(g.profit)  AS profit,
+        SUM(g.volume)  AS volume,
+        COUNT(*)       AS rounds,
+        u.points       AS points
       FROM game_logs g
       JOIN users u ON u.wallet = g.wallet
       WHERE g.time >= ?
       GROUP BY g.wallet
-    `).all(h48_start);
+    `).all(cutoff);
   }
 
   if (!rows.length) return res.json([]);
 
-  const maxProfit = Math.max(...rows.map(r => Math.max(r.profit, 0)));
-  const maxVolume = Math.max(...rows.map(r => r.volume));
-  const maxRounds = Math.max(...rows.map(r => r.rounds));
+  const maxProfit  = Math.max(...rows.map(r => Math.max(r.profit, 0)));
+  const maxVolume  = Math.max(...rows.map(r => r.volume));
+  const maxRounds  = Math.max(...rows.map(r => r.rounds));
 
   rows.forEach(r => {
     r.score =
-      (maxProfit ? Math.max(r.profit, 0) / maxProfit : 0) * 0.5 +
-      (maxVolume ? r.volume / maxVolume : 0) * 0.3 +
-      (maxRounds ? r.rounds / maxRounds : 0) * 0.2;
+      (maxProfit  ? Math.max(r.profit, 0) / maxProfit : 0) * 0.5 +
+      (maxVolume  ? r.volume / maxVolume             : 0) * 0.3 +
+      (maxRounds  ? r.rounds / maxRounds             : 0) * 0.2;
   });
 
   rows.sort((a, b) => b.score - a.score);
@@ -131,45 +131,33 @@ function ensureUser(wallet) {
 
 /* ================= HEALTH ================= */
 app.get("/", (_, res) => {
-  const count = db
-    .prepare(`SELECT COUNT(*) as c FROM users`)
-    .get().c;
+  const count = db.prepare(`SELECT COUNT(*) as c FROM users`).get().c;
+  res.json({ ok: true, service: "solspace-mainnet-db", players: count });
+});
 
-  res.json({
-    ok: true,
-    service: "solspace-mainnet-db",
-    players: count
-  });
-});
-app.get("/leaderboard/timers", (req, res) => {
-  res.json(leaderboardTimers());
-});
 /* ================= GAME RESULT ================= */
 app.post("/game/result", (req, res) => {
   const { wallet, profit, volume } = req.body;
 
-  if (!wallet || typeof profit !== "number" || typeof volume !== "number") {
+  if (!wallet || typeof profit !== "number" || typeof volume !== "number")
     return res.status(400).json({ ok: false });
-  }
 
-  if (profit < 0 || volume < 0) {
+  if (profit < 0 || volume < 0)
     return res.status(400).json({ ok: false });
-  }
 
-  if (profit > volume * MAX_MULTIPLIER) {
+  if (profit > volume * MAX_MULTIPLIER)
     return res.status(400).json({ ok: false });
-  }
 
   ensureUser(wallet);
 
-  db.prepare(`
-    UPDATE users SET points = points + ? WHERE wallet = ?
-  `).run(profit, wallet);
+  db.prepare(
+    `UPDATE users SET points = points + ? WHERE wallet = ?`
+  ).run(profit, wallet);
 
   db.prepare(`
     INSERT INTO game_logs (wallet, profit, volume, time, season)
     VALUES (?, ?, ?, ?, ?)
-  `).run(wallet, profit, volume, now(), seasonId());
+  `).run(wallet, profit, volume, Date.now(), seasonId());
 
   res.json({ ok: true });
 });
@@ -180,13 +168,56 @@ app.post("/check-deposit", async (req, res) => {
   if (!wallet) return res.json({ ok: false, addedPoint: 0 });
 
   ensureUser(wallet);
-
   let addedPoint = 0;
 
   try {
     const pubkey = new PublicKey(wallet);
-
     const sigs = await connection.getSignaturesForAddress(pubkey, { limit: 20 });
+
+    for (const s of sigs) {
+      const used = db
+        .prepare(`SELECT 1 FROM deposits WHERE signature = ?`)
+        .get(s.signature);
+      if (used) continue;
+
+      const tx = await connection.getParsedTransaction(
+        s.signature,
+        { maxSupportedTransactionVersion: 0 }
+      );
+      if (!tx || tx.meta?.err) continue;
+
+      for (const ix of tx.transaction.message.instructions) {
+        if (ix.program !== "system" || ix.parsed?.type !== "transfer") continue;
+
+        const { source, destination, lamports } = ix.parsed.info;
+
+        if (
+          source === wallet &&
+          destination === SYSTEM_WALLET.toString() &&
+          lamports >= MIN_DEPOSIT_SOL * 1e9
+        ) {
+          const sol = lamports / 1e9;
+          const points = Math.floor(sol * POINT_PER_SOL);
+
+          db.prepare(
+            `UPDATE users SET points = points + ? WHERE wallet = ?`
+          ).run(points, wallet);
+
+          db.prepare(
+            `INSERT INTO deposits (signature, wallet, points, time)
+             VALUES (?, ?, ?, ?)`
+          ).run(s.signature, wallet, points, Date.now());
+
+          addedPoint += points;
+        }
+      }
+    }
+
+    res.json({ ok: true, addedPoint });
+  } catch (e) {
+    res.json({ ok: false, addedPoint: 0 });
+  }
+});
 
     for (const s of sigs) {
       const used = db
