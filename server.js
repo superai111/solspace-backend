@@ -52,20 +52,28 @@ function now() {
   return Date.now();
 }
 
-function seasonId() {
-  const now = new Date();
+function leaderboardTimers() {
+  const now = Date.now();
 
+  // 48H countdown (reset mỗi 48h)
+  const H48 = 48 * 60 * 60 * 1000;
+  const next48h = Math.ceil(now / H48) * H48;
+
+  // Weekly countdown (reset thứ 2 00:00 UTC)
+  const d = new Date();
   const utcMidnight = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate()
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate()
   );
+  const day = (d.getUTCDay() + 6) % 7; // Monday = 0
+  const nextWeek = utcMidnight - day * 86400000 + 7 * 86400000;
 
-  const day = (new Date(utcMidnight).getUTCDay() + 6) % 7;
-  const monday = utcMidnight - day * 86400000;
-
-  return `W-${monday}`;
-}
+  return {
+    h48_end: next48h,
+    week_end: nextWeek
+  };
+    }
 
 function ensureUser(wallet) {
   db.prepare(
