@@ -104,7 +104,9 @@ app.get("/", (_, res) => {
     players: count
   });
 });
-
+app.get("/leaderboard/timers", (req, res) => {
+  res.json(leaderboardTimers());
+});
 /* ================= GAME RESULT ================= */
 app.post("/game/result", (req, res) => {
   const { wallet, profit, volume } = req.body;
