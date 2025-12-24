@@ -66,15 +66,14 @@ function seasonId() {
 }
 
 // timer leaderboard
+// ================= LEADERBOARD =================
 app.get("/leaderboard", (req, res) => {
   const range = req.query.range || "48h";
-
   let rows;
 
   if (range === "7d") {
-    // leaderboard TUẦN (theo season)
+    // TUẦN (theo season)
     const season = seasonId();
-
     rows = db.prepare(`
       SELECT
         g.wallet,
@@ -87,9 +86,8 @@ app.get("/leaderboard", (req, res) => {
       WHERE g.season = ?
       GROUP BY g.wallet
     `).all(season);
-
   } else {
-    // leaderboard 48H (reset đúng 48h, KHÔNG dính season)
+    // 48H (reset đúng block 48h)
     const H48 = 48 * 60 * 60 * 1000;
     const nowMs = Date.now();
     const h48_start = Math.floor(nowMs / H48) * H48;
