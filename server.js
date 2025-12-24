@@ -65,63 +65,17 @@ function seasonId() {
   return `W-${monday}`;
 }
 
-// timer leaderboard
-/* ================= LEADERBOARD ================= */
-app.get("/leaderboard", (req, res) => {
-  const range = req.query.range || "48h";
-  let rows = [];
-
-  if (range === "7d") {
-    const season = seasonId();
-
-    rows = db.prepare(`
-      SELECT
-        g.wallet,
-        SUM(g.profit)  AS profit,
-        SUM(g.volume)  AS volume,
-        COUNT(*)       AS rounds,
-        u.points       AS points
-      FROM game_logs g
-      JOIN users u ON u.wallet = g.wallet
-      WHERE g.season = ?
-      GROUP BY g.wallet
-    `).all(season);
-
-  } else {
-    const cutoff = Date.now() - 48 * 60 * 60 * 1000;
-
-    rows = db.prepare(`
-      SELECT
-        g.wallet,
-        SUM(g.profit)  AS profit,
-        SUM(g.volume)  AS volume,
-        COUNT(*)       AS rounds,
-        u.points       AS points
-      FROM game_logs g
-      JOIN users u ON u.wallet = g.wallet
-      WHERE g.time >= ?
-      GROUP BY g.wallet
-    `).all(cutoff);
-  }
-
-  if (!rows.length) return res.json([]);
-
-  const maxProfit  = Math.max(...rows.map(r => Math.max(r.profit, 0)));
-  const maxVolume  = Math.max(...rows.map(r => r.volume));
-  const maxRounds  = Math.max(...rows.map(r => r.rounds));
-
-  rows.forEach(r => {
-    r.score =
-      (maxProfit  ? Math.max(r.profit, 0) / maxProfit : 0) * 0.5 +
-      (maxVolume  ? r.volume / maxVolume             : 0) * 0.3 +
-      (maxRounds  ? r.rounds / maxRounds             : 0) * 0.2;
-  });
-
-  rows.sort((a, b) => b.score - a.score);
-  rows.forEach((r, i) => (r.rank = i + 1));
-
-  res.json(rows.slice(0, 50));
-});
+// leaderboard 48h, block 00:00 UTC
+function leaderboard48hStart() {
+  const d = new Date();
+  const todayUTC = Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate()
+  );
+  const blockIndex = Math.floor(todayUTC / (48 * 3600000));
+  return blockIndex * 48 * 3600000;
+}
 
 function ensureUser(wallet) {
   db.prepare(
@@ -132,7 +86,11 @@ function ensureUser(wallet) {
 /* ================= HEALTH ================= */
 app.get("/", (_, res) => {
   const count = db.prepare(`SELECT COUNT(*) as c FROM users`).get().c;
-  res.json({ ok: true, service: "solspace-mainnet-db", players: count });
+  res.json({
+    ok: true,
+    service: "solspace-mainnet-db",
+    players: count
+  });
 });
 
 /* ================= GAME RESULT ================= */
@@ -157,7 +115,7 @@ app.post("/game/result", (req, res) => {
   db.prepare(`
     INSERT INTO game_logs (wallet, profit, volume, time, season)
     VALUES (?, ?, ?, ?, ?)
-  `).run(wallet, profit, volume, Date.now(), seasonId());
+  `).run(wallet, profit, volume, now(), seasonId());
 
   res.json({ ok: true });
 });
@@ -206,7 +164,7 @@ app.post("/check-deposit", async (req, res) => {
           db.prepare(
             `INSERT INTO deposits (signature, wallet, points, time)
              VALUES (?, ?, ?, ?)`
-          ).run(s.signature, wallet, points, Date.now());
+          ).run(s.signature, wallet, points, now());
 
           addedPoint += points;
         }
@@ -214,54 +172,6 @@ app.post("/check-deposit", async (req, res) => {
     }
 
     res.json({ ok: true, addedPoint });
-  } catch (e) {
-    res.json({ ok: false, addedPoint: 0 });
-  }
-});
-
-    for (const s of sigs) {
-      const used = db
-        .prepare(`SELECT 1 FROM deposits WHERE signature = ?`)
-        .get(s.signature);
-
-      if (used) continue;
-
-      const tx = await connection.getParsedTransaction(
-        s.signature,
-        { maxSupportedTransactionVersion: 0 }
-      );
-
-      if (!tx || tx.meta?.err) continue;
-
-      for (const ix of tx.transaction.message.instructions) {
-        if (ix.program !== "system" || ix.parsed?.type !== "transfer") continue;
-
-        const { source, destination, lamports } = ix.parsed.info;
-
-        if (
-          source === wallet &&
-          destination === SYSTEM_WALLET.toString() &&
-          lamports >= MIN_DEPOSIT_SOL * 1e9
-        ) {
-          const sol = lamports / 1e9;
-          const points = Math.floor(sol * POINT_PER_SOL);
-
-          db.prepare(`
-            UPDATE users SET points = points + ? WHERE wallet = ?
-          `).run(points, wallet);
-
-          db.prepare(`
-            INSERT INTO deposits (signature, wallet, points, time)
-            VALUES (?, ?, ?, ?)
-          `).run(s.signature, wallet, points, now());
-
-          addedPoint += points;
-        }
-      }
-    }
-
-    res.json({ ok: true, addedPoint });
-
   } catch (e) {
     console.error(e);
     res.json({ ok: false, addedPoint: 0 });
@@ -271,22 +181,39 @@ app.post("/check-deposit", async (req, res) => {
 /* ================= LEADERBOARD ================= */
 app.get("/leaderboard", (req, res) => {
   const range = req.query.range || "48h";
-  const ms = range === "7d" ? 7 * 86400000 : 48 * 3600000;
-  const cutoff = now() - ms;
-  const season = seasonId();
+  let rows = [];
 
-  const rows = db.prepare(`
-    SELECT
-      g.wallet,
-      SUM(g.profit) AS profit,
-      SUM(g.volume) AS volume,
-      COUNT(*) AS rounds,
-      u.points AS points
-    FROM game_logs g
-    JOIN users u ON u.wallet = g.wallet
-    WHERE g.time >= ? AND g.season = ?
-    GROUP BY g.wallet
-  `).all(cutoff, season);
+  if (range === "7d") {
+    const season = seasonId();
+
+    rows = db.prepare(`
+      SELECT
+        g.wallet,
+        SUM(g.profit)  AS profit,
+        SUM(g.volume)  AS volume,
+        COUNT(*)       AS rounds,
+        u.points       AS points
+      FROM game_logs g
+      JOIN users u ON u.wallet = g.wallet
+      WHERE g.season = ?
+      GROUP BY g.wallet
+    `).all(season);
+  } else {
+    const cutoff = leaderboard48hStart();
+
+    rows = db.prepare(`
+      SELECT
+        g.wallet,
+        SUM(g.profit)  AS profit,
+        SUM(g.volume)  AS volume,
+        COUNT(*)       AS rounds,
+        u.points       AS points
+      FROM game_logs g
+      JOIN users u ON u.wallet = g.wallet
+      WHERE g.time >= ?
+      GROUP BY g.wallet
+    `).all(cutoff);
+  }
 
   if (!rows.length) return res.json([]);
 
