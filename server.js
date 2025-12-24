@@ -77,6 +77,37 @@ function leaderboard48hStart() {
   return blockIndex * 48 * 3600000;
 }
 
+/* ======== ADDED: LEADERBOARD TIMERS (KHÔNG ĐỤNG GÌ KHÁC) ======== */
+
+// 00:00 UTC hôm nay
+function utcTodayStart() {
+  const d = new Date();
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+// kết thúc block 48h (theo 00:00 UTC)
+function h48End() {
+  return leaderboard48hStart() + 48 * 3600000;
+}
+
+// kết thúc season (thứ 2 00:00 UTC kế tiếp)
+function seasonEnd() {
+  const d = new Date();
+  const utcMidnight = utcTodayStart();
+  const day = (d.getUTCDay() + 6) % 7;
+  const mondayThisWeek = utcMidnight - day * 86400000;
+  return mondayThisWeek + 7 * 86400000;
+}
+
+function leaderboardTimers() {
+  return {
+    now: Date.now(),
+    h48_end: h48End(),
+    season_end: seasonEnd()
+  };
+}
+/* ======== END ADDED ======== */
+
 function ensureUser(wallet) {
   db.prepare(
     `INSERT OR IGNORE INTO users (wallet, points) VALUES (?, 0)`
@@ -269,6 +300,12 @@ app.get("/leaderboard/final", (req, res) => {
 
   res.json(rows.slice(0, 100));
 });
+
+/* ======== ADDED ROUTE ======== */
+app.get("/leaderboard/timers", (req, res) => {
+  res.json(leaderboardTimers());
+});
+/* ======== END ADDED ======== */
 
 /* ================= POINTS ================= */
 app.get("/points", (req, res) => {
