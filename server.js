@@ -72,7 +72,6 @@ app.get("/leaderboard", (req, res) => {
   let rows;
 
   if (range === "7d") {
-    // TUẦN (theo season)
     const season = seasonId();
     rows = db.prepare(`
       SELECT
@@ -87,7 +86,6 @@ app.get("/leaderboard", (req, res) => {
       GROUP BY g.wallet
     `).all(season);
   } else {
-    // 48H (reset đúng block 48h)
     const H48 = 48 * 60 * 60 * 1000;
     const nowMs = Date.now();
     const h48_start = Math.floor(nowMs / H48) * H48;
