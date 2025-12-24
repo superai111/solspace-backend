@@ -53,14 +53,25 @@ function now() {
 }
 
 function seasonId() {
-  const d = new Date();
-  const year = d.getUTCFullYear();
-  const week = Math.floor(
-    (Date.UTC(year, d.getUTCMonth(), d.getUTCDate()) -
-      Date.UTC(year, 0, 1)) /
-      (7 * 24 * 60 * 60 * 1000)
+  const now = new Date();
+
+  // UTC timestamp
+  const utc = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate()
   );
-  return `${year}-W${week}`;
+
+  // Thứ trong tuần (Thứ 2 = 0)
+  const day = (new Date(utc).getUTCDay() + 6) % 7;
+
+  // Lùi về 0h00 Thứ 2
+  const monday = utc - day * 24 * 60 * 60 * 1000;
+
+  // Số tuần kể từ epoch
+  const week = Math.floor(monday / (7 * 24 * 60 * 60 * 1000));
+
+  return `W-${week}`;
 }
 
 function ensureUser(wallet) {
