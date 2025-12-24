@@ -52,14 +52,8 @@ function now() {
   return Date.now();
 }
 
-function leaderboardTimers() {
-  const now = Date.now();
-
-  // 48H countdown (reset mỗi 48h)
-  const H48 = 48 * 60 * 60 * 1000;
-  const next48h = Math.ceil(now / H48) * H48;
-
-  // Weekly countdown (reset thứ 2 00:00 UTC)
+// season = tuần, reset thứ 2 00:00 UTC
+function seasonId() {
   const d = new Date();
   const utcMidnight = Date.UTC(
     d.getUTCFullYear(),
@@ -67,12 +61,29 @@ function leaderboardTimers() {
     d.getUTCDate()
   );
   const day = (d.getUTCDay() + 6) % 7; // Monday = 0
-  const nextWeek = utcMidnight - day * 86400000 + 7 * 86400000;
+  const monday = utcMidnight - day * 86400000;
+  return `W-${monday}`;
+}
 
-  return {
-    h48_end: next48h,
-    week_end: nextWeek
-  };
+// timer leaderboard
+function leaderboardTimers() {
+  const nowMs = Date.now();
+
+  // 48h
+  const H48 = 48 * 60 * 60 * 1000;
+  const h48_end = Math.ceil(nowMs / H48) * H48;
+
+  // tuần (thứ 2 00:00 UTC)
+  const d = new Date();
+  const utcMidnight = Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate()
+  );
+  const day = (d.getUTCDay() + 6) % 7;
+  const week_end = utcMidnight - day * 86400000 + 7 * 86400000;
+
+  return { h48_end, week_end };
     }
 
 function ensureUser(wallet) {
