@@ -77,7 +77,7 @@ function leaderboard48hStart() {
   return blockIndex * 48 * 3600000;
 }
 
-/* ======== ADDED: LEADERBOARD TIMERS (KHÔNG ĐỤNG GÌ KHÁC) ======== */
+/* ======== ADDED: LEADERBOARD TIMERS ======== */
 
 // 00:00 UTC hôm nay
 function utcTodayStart() {
